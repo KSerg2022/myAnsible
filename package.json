@@ -2,8 +2,10 @@
   "name": "ansiblelocal",
   "version": "1.0.0",
   "description": "",
-  "author": "",
+  "author": "KSV",
   "scripts": {
-    "git:pull": "ansible-playbook -i localhost, -c local ansible/pull_all_repos.yml"
+    "git:pull": "ansible-playbook -i localhost, -c local ansible/pull_all_repos.yml",
+    "git:pull:dry": "ansible-playbook -i localhost, -c local ansible/pull_all_repos.yml -e dry_run=true",
+    "git:pull:all": "ansible-playbook -i localhost, -c local ansible/pull_all_repos.yml -e skip_dirty=false"
   }
 }
