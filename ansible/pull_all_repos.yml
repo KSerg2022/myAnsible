@@ -1,0 +1,301 @@
+---
+- name: Pull all git repos under configured base_dirs (excluding configured excludes)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    config_file: "{{ lookup('env', 'PULL_CONFIG') | default('config.pull.json', true) }}"
+  tasks:
+    - name: Load pull config
+      ansible.builtin.include_vars:
+        file: "{{ config_file }}"
+        name: pull_cfg
+
+    - name: Apply defaults
+      ansible.builtin.set_fact:
+        base_dirs: "{{ pull_cfg.base_dirs | default(['/home/ksv/solongoProjects']) }}"
+        exclude_dirs: "{{ pull_cfg.exclude_dirs | default(['/home/ksv/solongoProjects/ansibleLocal']) }}"
+        max_depth: "{{ pull_cfg.max_depth | default(none) }}"
+        branch_priority: "{{ pull_cfg.branch_priority | default(['stage', 'prod', 'Prod', 'main', 'master']) }}"
+        prefer_current: "{{ pull_cfg.prefer_current | default(true) }}"
+        allow_remote_branches: "{{ pull_cfg.allow_remote_branches | default(true) }}"
+        remote_name: "{{ pull_cfg.remote_name | default('origin') }}"
+        pull_ff_only: "{{ pull_cfg.pull_ff_only | default(true) }}"
+        skip_dirty: "{{ pull_cfg.skip_dirty | default(true) }}"
+        dry_run: "{{ pull_cfg.dry_run | default(false) }}"
+
+    - name: Find git directories
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        patterns: ".git"
+        file_type: directory
+        hidden: true
+        recurse: true
+        depth: "{{ (max_depth is none) | ternary(omit, max_depth) }}"
+      loop: "{{ base_dirs }}"
+      register: git_dirs
+
+    - name: Flatten git dirs list
+      ansible.builtin.set_fact:
+        git_dirs_all: "{{ git_dirs.results | map(attribute='files') | list | flatten | default([]) }}"
+
+    - name: Build repo list (parent dirs of .git)
+      ansible.builtin.set_fact:
+        repo_dirs_raw: >-
+          {{
+            git_dirs_all
+            | map(attribute='path')
+            | map('dirname')
+            | unique
+            | list
+          }}
+
+    - name: Build exclude regex
+      ansible.builtin.set_fact:
+        exclude_regex: >-
+          {{
+            (exclude_dirs | length > 0)
+            | ternary('^(' + (exclude_dirs | map('regex_escape') | join('|')) + ')(/|$)', '')
+          }}
+
+    - name: Apply excludes
+      ansible.builtin.set_fact:
+        repo_dirs: >-
+          {{
+            (repo_dirs_raw | reject('regex', exclude_regex) | list)
+            if exclude_regex else repo_dirs_raw
+          }}
+
+    - name: Check dirty repos
+      ansible.builtin.command:
+        cmd: git -C {{ item }} status --porcelain
+      loop: "{{ repo_dirs }}"
+      register: git_status_results
+      changed_when: false
+      failed_when: false
+
+    - name: Init dirty repo info
+      ansible.builtin.set_fact:
+        dirty_repo_info: []
+
+    - name: Collect dirty repo info (status failed)
+      ansible.builtin.set_fact:
+        dirty_repo_info: >-
+          {{
+            dirty_repo_info + [
+              {
+                'path': item.item,
+                'reason': 'status_failed',
+                'details': (item.stderr | default(''))
+              }
+            ]
+          }}
+      loop: "{{ git_status_results.results }}"
+      when: item.rc != 0
+
+    - name: Collect dirty repo info (working tree dirty)
+      ansible.builtin.set_fact:
+        dirty_repo_info: >-
+          {{
+            dirty_repo_info + [
+              {
+                'path': item.item,
+                'reason': 'working_tree_dirty',
+                'details': (item.stdout | default(''))
+              }
+            ]
+          }}
+      loop: "{{ git_status_results.results }}"
+      when: item.rc == 0 and (item.stdout | default('')) != ''
+
+    - name: Build dirty/clean repo lists
+      ansible.builtin.set_fact:
+        dirty_repos: "{{ dirty_repo_info | map(attribute='path') | list | unique }}"
+        clean_repos: "{{ repo_dirs | difference(dirty_repos) }}"
+
+    - name: Show dirty repo info
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (skip_dirty | bool)
+            | ternary('Skipping dirty repo: ', 'Dirty repo (will proceed): ')
+          }}{{ item.path }} reason={{ item.reason }} details={{ item.details | default('') }}
+      loop: "{{ dirty_repo_info }}"
+      when: dirty_repo_info | length > 0
+
+    - name: Select repos for actions
+      ansible.builtin.set_fact:
+        repo_dirs_for_actions: "{{ (skip_dirty | bool) | ternary(clean_repos, repo_dirs) }}"
+
+    - name: Select branch (configurable) and switch if needed
+      ansible.builtin.shell: |
+        set -u
+        cd "{{ item }}"
+
+        branches="{{ branch_priority | join(' ') }}"
+        prefer_current="{{ prefer_current | bool | ternary('1', '0') }}"
+        allow_remote="{{ allow_remote_branches | bool | ternary('1', '0') }}"
+        remote_name="{{ remote_name }}"
+        remote_prefix="$remote_name/"
+
+        current="$(git symbolic-ref --short -q HEAD || true)"
+
+        has_local() { git show-ref --verify --quiet "refs/heads/$1"; }
+        has_remote() { git show-ref --verify --quiet "refs/remotes/$remote_name/$1"; }
+
+        choose=""
+
+        if [ "$prefer_current" = "1" ] && [ -n "$current" ]; then
+          choose="$current"
+        fi
+
+        if [ -z "$choose" ] && [ -n "$branches" ]; then
+          for b in $branches; do
+            if has_local "$b"; then
+              choose="$b"
+              break
+            fi
+            if [ "$allow_remote" = "1" ] && has_remote "$b"; then
+              choose="$remote_name/$b"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$choose" ]; then
+          choose="$(git for-each-ref --format='%(refname:short)' refs/heads | head -n 1 || true)"
+        fi
+
+        if [ -z "$choose" ]; then
+          echo "NO_BRANCH"
+          exit 0
+        fi
+
+        if [ "${choose#$remote_prefix}" != "$choose" ]; then
+          remote_branch="${choose#$remote_prefix}"
+          if [ "$current" != "$remote_branch" ]; then
+            git checkout -B "$remote_branch" "$choose" >/dev/null
+          fi
+          echo "$remote_branch"
+        else
+          if [ "$current" != "$choose" ]; then
+            git checkout "$choose" >/dev/null
+          fi
+          echo "$choose"
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ repo_dirs_for_actions }}"
+      register: branch_switch_results
+      failed_when: false
+      when: not (dry_run | bool)
+
+    - name: Build repo -> branch map
+      ansible.builtin.set_fact:
+        repo_branch_map: "{{ repo_branch_map | default({}) | combine({ item.item: (item.stdout | default('')) }) }}"
+      loop: "{{ branch_switch_results.results | default([]) }}"
+      when: not (dry_run | bool)
+
+    - name: Build dry-run plan
+      ansible.builtin.shell: |
+        set -u
+        cd "{{ item }}"
+
+        branches="{{ branch_priority | join(' ') }}"
+        prefer_current="{{ prefer_current | bool | ternary('1', '0') }}"
+        allow_remote="{{ allow_remote_branches | bool | ternary('1', '0') }}"
+        remote_name="{{ remote_name }}"
+        remote_prefix="$remote_name/"
+
+        current="$(git symbolic-ref --short -q HEAD || true)"
+
+        has_local() { git show-ref --verify --quiet "refs/heads/$1"; }
+        has_remote() { git show-ref --verify --quiet "refs/remotes/$remote_name/$1"; }
+
+        choose=""
+
+        if [ "$prefer_current" = "1" ] && [ -n "$current" ]; then
+          choose="$current"
+        fi
+
+        if [ -z "$choose" ] && [ -n "$branches" ]; then
+          for b in $branches; do
+            if has_local "$b"; then
+              choose="$b"
+              break
+            fi
+            if [ "$allow_remote" = "1" ] && has_remote "$b"; then
+              choose="$remote_name/$b"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$choose" ]; then
+          choose="$(git for-each-ref --format='%(refname:short)' refs/heads | head -n 1 || true)"
+        fi
+
+        if [ -z "$choose" ]; then
+          echo "NO_BRANCH"
+          exit 0
+        fi
+
+        if [ "${choose#$remote_prefix}" != "$choose" ]; then
+          remote_branch="${choose#$remote_prefix}"
+          if [ "$current" != "$remote_branch" ]; then
+            checkout="checkout -B $remote_branch $remote_name/$remote_branch"
+          else
+            checkout="checkout (no-op, already on $remote_branch)"
+          fi
+          branch_out="$remote_branch"
+        else
+          if [ "$current" != "$choose" ]; then
+            checkout="checkout $choose"
+          else
+            checkout="checkout (no-op, already on $choose)"
+          fi
+          branch_out="$choose"
+        fi
+
+        if [ "{{ pull_ff_only | bool | ternary('1','0') }}" = "1" ]; then
+          pull_cmd="git pull --ff-only"
+        else
+          pull_cmd="git pull"
+        fi
+
+        echo "branch=$branch_out checkout=\"$checkout\" pull=\"$pull_cmd\""
+      args:
+        executable: /bin/bash
+      loop: "{{ repo_dirs_for_actions }}"
+      register: dry_run_plan
+      failed_when: false
+      when: dry_run | bool
+
+    - name: Show dry-run plan
+      ansible.builtin.debug:
+        msg: "DRY_RUN: {{ item.item }} -> {{ item.stdout }}"
+      loop: "{{ dry_run_plan.results | default([]) }}"
+      when: dry_run | bool
+
+    - name: Git pull each repo (ff-only)
+      ansible.builtin.command:
+        cmd: >-
+          git -C {{ item }} pull{{ (pull_ff_only | bool) | ternary(' --ff-only', '') }}
+      loop: "{{ repo_dirs_for_actions }}"
+      register: git_pull_results
+      changed_when: >-
+        rc == 0 and
+        ('Already up to date.' not in (stdout | default(''))) and
+        ('Already up-to-date.' not in (stdout | default('')))
+      failed_when: false
+      when: not (dry_run | bool)
+
+    - name: Show summary
+      ansible.builtin.debug:
+        msg: "{{ item.item }} -> branch={{ repo_branch_map[item.item] | default('') }} rc={{ item.rc }} stdout={{ item.stdout | default('') }} stderr={{ item.stderr | default('') }}"
+      loop: "{{ git_pull_results.results | default([]) }}"
+      when: not (dry_run | bool)
+
+    - name: Show repos where git pull ran OK
+      ansible.builtin.debug:
+        msg: "{{ git_pull_results.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+      when: not (dry_run | bool)

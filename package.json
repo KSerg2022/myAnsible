@@ -1,0 +1,9 @@
+{
+  "name": "ansiblelocal",
+  "version": "1.0.0",
+  "description": "",
+  "author": "",
+  "scripts": {
+    "git:pull": "ansible-playbook -i localhost, -c local ansible/pull_all_repos.yml"
+  }
+}

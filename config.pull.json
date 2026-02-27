@@ -1,0 +1,12 @@
+{
+  "base_dirs": ["/home/ksv/solongoProjects", "/home/ksv/solongoApp"],
+  "exclude_dirs": ["/home/ksv/solongoProjects/ansibleLocal"],
+  "max_depth": 1,
+  "branch_priority": ["stage", "prod", "Prod", "main", "master"],
+  "prefer_current": true,
+  "allow_remote_branches": true,
+  "remote_name": "origin",
+  "pull_ff_only": true,
+  "skip_dirty": true,
+  "dry_run": false
+}
