@@ -43,6 +43,7 @@
 8. Выполняет `git pull` (по умолчанию `--ff-only`).
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 30}}}%%
 flowchart TD
   A[Start] --> B[Load config]
   B --> C[Find .git under base_dirs]

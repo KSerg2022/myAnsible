@@ -43,6 +43,7 @@ Das Playbook `ansible/pull_all_repos.yml` macht:
 8. `git pull` ausfuehren (standardmaessig `--ff-only`).
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 30}}}%%
 flowchart TD
   A[Start] --> B[Load config]
   B --> C[Find .git under base_dirs]
