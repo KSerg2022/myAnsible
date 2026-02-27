@@ -34,13 +34,14 @@
 
 Плейбук `ansible/pull_all_repos.yml` делает:
 1. Загружает конфиг из `PULL_CONFIG` или `config.pull.json`.
-2. Находит `.git` в `base_dirs` (с учетом `max_depth`).
+2. Находит `.git` как директории или файлы в `base_dirs` (с учетом `max_depth`), чтобы включать worktree/подмодули.
 3. Исключает пути из `exclude_dirs`.
 4. Проверяет `git status --porcelain`.
 5. При `skip_dirty: true` исключает грязные репозитории.
-6. Делает `git fetch --prune <remote>`.
-7. Выбирает ветку по приоритету и делает checkout при необходимости.
-8. Выполняет `git pull` (по умолчанию `--ff-only`).
+6. Проверяет наличие заданного remote.
+7. Делает `git fetch --prune <remote>` (или `--dry-run` в режиме `dry_run`).
+8. Выбирает ветку по приоритету и делает checkout при необходимости (грязные репы остаются на текущей ветке).
+9. Выполняет `git pull` (по умолчанию `--ff-only`).
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 30}}}%%
@@ -52,8 +53,9 @@ flowchart TD
   E --> F{skip_dirty?}
   F -->|yes| G[Keep clean repos]
   F -->|no| H[Keep all repos]
-  G --> I[git fetch --prune <remote>]
-  H --> I
+  G --> R[Check remote exists]
+  H --> R
+  R --> I[git fetch --prune <remote>]
   I --> J[Select branch]
   J --> K[Checkout if needed]
   K --> L{dry_run?}
@@ -76,8 +78,8 @@ flowchart TD
   - `ansible/../<config>` (корень репозитория)
 
 Опции:
-- `base_dirs`: базовые директории для поиска репозиториев.
-- `exclude_dirs`: директории, которые нужно исключить.
+- `base_dirs`: базовые директории для поиска репозиториев (поддерживаются `~` и `$HOME`).
+- `exclude_dirs`: директории, которые нужно исключить (поддерживаются `~` и `$HOME`).
 - `max_depth`: ограничение глубины поиска.
   - `1` означает, что репозитории на один уровень ниже `base_dirs`.
   - Внутри плейбук добавляет `+1`, чтобы учесть `.git`.
@@ -137,6 +139,7 @@ PULL_CONFIG=/path/to/config.pull.json ansible-playbook -i localhost, -c local an
 <summary>Dry Run</summary>
 
 В режиме `dry_run` показывается выбранная ветка, checkout и команда `pull`.
+Также выполняется `git fetch --prune --dry-run`, чтобы план был ближе к реальности.
 Пример:
 ```
 DRY_RUN: /path/to/repo -> branch=main checkout="checkout (no-op, already on main)" pull="git pull --ff-only"
@@ -159,7 +162,8 @@ DRY_RUN: /path/to/repo -> branch=main checkout="checkout (no-op, already on main
 1. Если `prefer_current` включен и есть текущая ветка, выбрать ее.
 2. Иначе пройти по `branch_priority` (сначала локальные, потом удаленные).
 3. Если ничего не найдено, взять первую локальную ветку.
-4. Если выбрана удаленная ветка, создать локальную от нее.
+4. Если выбрана удаленная ветка, создать локальную только если ее нет.
+5. Если репозиторий грязный и `skip_dirty=false`, не переключать ветку.
 
 </details>
 
@@ -169,6 +173,7 @@ DRY_RUN: /path/to/repo -> branch=main checkout="checkout (no-op, already on main
 
 Плейбук выводит:
 - список пропущенных грязных репозиториев;
+- список репозиториев без нужного remote;
 - отдельные списки ошибок для `fetch`, `checkout` и `pull`;
 - summary по результатам `pull`.
 

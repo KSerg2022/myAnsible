@@ -34,13 +34,14 @@ Wichtige Defaults:
 
 Das Playbook `ansible/pull_all_repos.yml` macht:
 1. Konfig laden aus `PULL_CONFIG` oder `config.pull.json`.
-2. `.git`-Verzeichnisse in `base_dirs` finden (mit `max_depth`).
+2. `.git`-Verzeichnisse oder Dateien in `base_dirs` finden (mit `max_depth`), damit Worktrees/Submodule erfasst werden.
 3. Pfade aus `exclude_dirs` ausschliessen.
 4. `git status --porcelain` pruefen.
 5. Bei `skip_dirty: true` schmutzige Repos ausschliessen.
-6. `git fetch --prune <remote>`.
-7. Branch nach Prioritaet auswaehlen und ggf. checkout.
-8. `git pull` ausfuehren (standardmaessig `--ff-only`).
+6. Pruefen, ob das konfigurierte Remote existiert.
+7. `git fetch --prune <remote>` (oder `--dry-run` bei `dry_run`).
+8. Branch nach Prioritaet auswaehlen und ggf. checkout (schmutzige Repos bleiben auf der aktuellen Branch).
+9. `git pull` ausfuehren (standardmaessig `--ff-only`).
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 30}}}%%
@@ -52,8 +53,9 @@ flowchart TD
   E --> F{skip_dirty?}
   F -->|yes| G[Keep clean repos]
   F -->|no| H[Keep all repos]
-  G --> I[git fetch --prune <remote>]
-  H --> I
+  G --> R[Check remote exists]
+  H --> R
+  R --> I[git fetch --prune <remote>]
   I --> J[Select branch]
   J --> K[Checkout if needed]
   K --> L{dry_run?}
@@ -76,8 +78,8 @@ Pfadauflösung:
   - `ansible/../<config>` (Repo-Root)
 
 Optionen:
-- `base_dirs`: Basisverzeichnisse zum Scannen.
-- `exclude_dirs`: Verzeichnisse, die ausgeschlossen werden.
+- `base_dirs`: Basisverzeichnisse zum Scannen (unterstuetzt `~` und `$HOME`).
+- `exclude_dirs`: Verzeichnisse, die ausgeschlossen werden (unterstuetzt `~` und `$HOME`).
 - `max_depth`: Tiefe fuer die Suche.
   - `1` bedeutet: Repos eine Ebene unter `base_dirs`.
   - Intern wird `+1` addiert, um `.git` zu treffen.
@@ -137,6 +139,7 @@ PULL_CONFIG=/path/to/config.pull.json ansible-playbook -i localhost, -c local an
 <summary>Dry Run</summary>
 
 `dry_run` zeigt den ausgewaehlten Branch, Checkout-Aktion und die geplante Pull-Command.
+Ausserdem laeuft `git fetch --prune --dry-run`, damit die Planung naeher an der Realität ist.
 Beispiel:
 ```
 DRY_RUN: /path/to/repo -> branch=main checkout="checkout (no-op, already on main)" pull="git pull --ff-only"
@@ -159,7 +162,8 @@ Algorithmus:
 1. Wenn `prefer_current` aktiv und eine aktuelle Branch existiert, nutze sie.
 2. Sonst `branch_priority` pruefen (lokal zuerst, dann remote).
 3. Wenn nichts passt, erste lokale Branch nehmen.
-4. Wenn eine Remote-Branch gewaehlt wurde, lokale Branch daraus anlegen.
+4. Wenn eine Remote-Branch gewaehlt wurde, lokale Branch nur anlegen, wenn sie fehlt.
+5. Wenn das Repo schmutzig ist und `skip_dirty=false`, keinen Checkout machen.
 
 </details>
 
@@ -169,6 +173,7 @@ Algorithmus:
 
 Das Playbook zeigt:
 - uebersprungene schmutzige Repos;
+- Repos ohne das konfigurierte Remote;
 - separate Fehlerlisten fuer `fetch`, `checkout` und `pull`;
 - Summary der Pull-Ergebnisse.
 

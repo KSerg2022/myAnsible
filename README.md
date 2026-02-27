@@ -34,13 +34,14 @@ Key defaults:
 
 The playbook `ansible/pull_all_repos.yml` performs:
 1. Load config from `PULL_CONFIG` or `config.pull.json`.
-2. Find `.git` directories under `base_dirs` (with `max_depth`).
+2. Find `.git` directories or files under `base_dirs` (with `max_depth`), so worktrees/submodules are included.
 3. Exclude paths from `exclude_dirs`.
 4. Check `git status --porcelain`.
 5. If `skip_dirty: true`, filter out dirty repos.
-6. `git fetch --prune <remote>`.
-7. Select a branch by priority and checkout if needed.
-8. Run `git pull` (`--ff-only` by default).
+6. Verify the configured remote exists.
+7. `git fetch --prune <remote>` (or `--dry-run` in `dry_run`).
+8. Select a branch by priority and checkout if needed (dirty repos keep the current branch).
+9. Run `git pull` (`--ff-only` by default).
 
 ```mermaid
 %%{init: {'flowchart': {'nodeSpacing': 20, 'rankSpacing': 30}}}%%
@@ -52,8 +53,9 @@ flowchart TD
   E --> F{skip_dirty?}
   F -->|yes| G[Keep clean repos]
   F -->|no| H[Keep all repos]
-  G --> I[git fetch --prune <remote>]
-  H --> I
+  G --> R[Check remote exists]
+  H --> R
+  R --> I[git fetch --prune <remote>]
   I --> J[Select branch]
   J --> K[Checkout if needed]
   K --> L{dry_run?}
@@ -76,8 +78,8 @@ Config path resolution:
   - `ansible/../<config>` (repo root)
 
 Options:
-- `base_dirs`: base directories to scan for repos.
-- `exclude_dirs`: directories to exclude.
+- `base_dirs`: base directories to scan for repos (supports `~` and `$HOME`).
+- `exclude_dirs`: directories to exclude (supports `~` and `$HOME`).
 - `max_depth`: scan depth limit.
   - `1` means repos are one level under `base_dirs`.
   - Internally the playbook adds `+1` to include `.git`.
@@ -137,6 +139,7 @@ PULL_CONFIG=/path/to/config.pull.json ansible-playbook -i localhost, -c local an
 <summary>Dry Run</summary>
 
 `dry_run` prints the selected branch, checkout action, and planned pull command.
+It also runs `git fetch --prune --dry-run` to make branch selection closer to reality.
 Example:
 ```
 DRY_RUN: /path/to/repo -> branch=main checkout="checkout (no-op, already on main)" pull="git pull --ff-only"
@@ -159,7 +162,8 @@ Algorithm:
 1. If `prefer_current` is enabled and a current branch exists, use it.
 2. Otherwise scan `branch_priority` (local first, then remote).
 3. If none found, pick the first local branch.
-4. If a remote branch is selected, create a local branch from it.
+4. If a remote branch is selected, create a local branch from it only if missing.
+5. If the repo is dirty and `skip_dirty=false`, do not checkout; stay on current branch.
 
 </details>
 
@@ -169,6 +173,7 @@ Algorithm:
 
 The playbook prints:
 - skipped dirty repos;
+- repos missing the configured remote;
 - separate error summaries for `fetch`, `checkout`, and `pull`;
 - a summary of pull results.
 

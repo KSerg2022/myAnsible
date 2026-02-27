@@ -96,11 +96,35 @@
         dry_run: "{{ cfg_dry_run }}"
       when: dry_run is not defined
 
+    - name: Read home dir for path expansion
+      ansible.builtin.set_fact:
+        home_dir: "{{ lookup('env', 'HOME') | default('') }}"
+
+    - name: Expand base_dirs (~ and $HOME)
+      ansible.builtin.set_fact:
+        base_dirs: >-
+          {{
+            base_dirs
+            | map('regex_replace', '^~', home_dir)
+            | map('regex_replace', '\\$HOME', home_dir)
+            | list
+          }}
+
+    - name: Expand exclude_dirs (~ and $HOME)
+      ansible.builtin.set_fact:
+        exclude_dirs: >-
+          {{
+            exclude_dirs
+            | map('regex_replace', '^~', home_dir)
+            | map('regex_replace', '\\$HOME', home_dir)
+            | list
+          }}
+
     - name: Find git directories
       ansible.builtin.find:
         paths: "{{ item }}"
         patterns: ".git"
-        file_type: directory
+        file_type: any
         hidden: true
         recurse: true
         depth: "{{ (max_depth is none) | ternary(omit, (max_depth | int) + 1) }}"
@@ -203,6 +227,38 @@
       ansible.builtin.set_fact:
         repo_dirs_for_actions: "{{ (skip_dirty | bool) | ternary(clean_repos, repo_dirs) }}"
 
+    - name: Check remote exists
+      ansible.builtin.command:
+        argv:
+          - git
+          - remote
+          - get-url
+          - "{{ remote_name }}"
+        chdir: "{{ item }}"
+      loop: "{{ repo_dirs_for_actions }}"
+      register: git_remote_results
+      changed_when: false
+      failed_when: false
+
+    - name: Show missing remote (details)
+      ansible.builtin.debug:
+        msg: "{{ item.item }} rc={{ item.rc }} stdout={{ item.stdout | default('') }} stderr={{ item.stderr | default('') }}"
+      loop: "{{ git_remote_results.results | default([]) | selectattr('rc', 'ne', 0) | list }}"
+      when: git_remote_results is defined
+
+    - name: Show missing remote (summary)
+      ansible.builtin.debug:
+        msg: "{{ git_remote_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
+      when: git_remote_results is defined and (git_remote_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
+
+    - name: Keep repos with configured remote
+      ansible.builtin.set_fact:
+        repo_dirs_for_actions_remote: >-
+          {{
+            (git_remote_results.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list)
+            if (git_remote_results is defined) else []
+          }}
+
     - name: Fetch remote refs (prune)
       ansible.builtin.command:
         argv:
@@ -211,21 +267,35 @@
           - --prune
           - "{{ remote_name }}"
         chdir: "{{ item }}"
-      loop: "{{ repo_dirs_for_actions }}"
+      loop: "{{ repo_dirs_for_actions_remote }}"
       register: git_fetch_results
       failed_when: false
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (repo_dirs_for_actions_remote | length > 0)
 
     - name: Show fetch failures (details)
       ansible.builtin.debug:
         msg: "{{ item.item }} rc={{ item.rc }} stdout={{ item.stdout | default('') }} stderr={{ item.stderr | default('') }}"
       loop: "{{ git_fetch_results.results | default([]) | selectattr('rc', 'ne', 0) | list }}"
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (git_fetch_results is defined)
 
     - name: Show fetch failures (summary)
       ansible.builtin.debug:
         msg: "{{ git_fetch_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
-      when: not (dry_run | bool) and (git_fetch_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
+      when: not (dry_run | bool) and (git_fetch_results is defined) and (git_fetch_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
+
+    - name: Fetch remote refs (prune, dry-run)
+      ansible.builtin.command:
+        argv:
+          - git
+          - fetch
+          - --prune
+          - --dry-run
+          - "{{ remote_name }}"
+        chdir: "{{ item }}"
+      loop: "{{ repo_dirs_for_actions_remote }}"
+      register: git_fetch_dry_results
+      failed_when: false
+      when: dry_run | bool and (repo_dirs_for_actions_remote | length > 0)
 
     - name: Select branch (configurable) and switch if needed
       ansible.builtin.command:
@@ -238,27 +308,57 @@
         ALLOW_REMOTE_BRANCHES: "{{ allow_remote_branches | bool | ternary('1', '0') }}"
         REMOTE_NAME: "{{ remote_name }}"
         PULL_FF_ONLY: "{{ pull_ff_only | bool | ternary('1', '0') }}"
-      loop: "{{ repo_dirs_for_actions }}"
+        DIRTY_REPO: "{{ (item in dirty_repos) | ternary('1', '0') }}"
+      loop: "{{ repo_dirs_for_actions_remote }}"
       register: branch_switch_results
       failed_when: false
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (repo_dirs_for_actions_remote | length > 0)
 
     - name: Show branch switch failures (details)
       ansible.builtin.debug:
         msg: "{{ item.item }} rc={{ item.rc }} stdout={{ item.stdout | default('') }} stderr={{ item.stderr | default('') }}"
       loop: "{{ branch_switch_results.results | default([]) | selectattr('rc', 'ne', 0) | list }}"
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (branch_switch_results is defined)
 
     - name: Show branch switch failures (summary)
       ansible.builtin.debug:
         msg: "{{ branch_switch_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
-      when: not (dry_run | bool) and (branch_switch_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
+      when: not (dry_run | bool) and (branch_switch_results is defined) and (branch_switch_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
 
     - name: Build repo -> branch map
       ansible.builtin.set_fact:
         repo_branch_map: "{{ repo_branch_map | default({}) | combine({ item.item: (item.stdout | default('')) }) }}"
       loop: "{{ branch_switch_results.results | default([]) }}"
+      when: not (dry_run | bool) and (branch_switch_results is defined)
+
+    - name: Ensure repo branch map default
+      ansible.builtin.set_fact:
+        repo_branch_map: "{{ repo_branch_map | default({}) }}"
       when: not (dry_run | bool)
+
+    - name: Build repo list for pull
+      ansible.builtin.set_fact:
+        repo_dirs_for_pull: >-
+          {{
+            repo_branch_map
+            | dict2items
+            | rejectattr('value', 'in', ['', 'NO_BRANCH'])
+            | map(attribute='key')
+            | list
+          }}
+      when: not (dry_run | bool)
+
+    - name: Show repos skipped (no branch)
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            repo_branch_map
+            | dict2items
+            | selectattr('value', 'in', ['', 'NO_BRANCH'])
+            | map(attribute='key')
+            | list
+          }}
+      when: not (dry_run | bool) and (repo_branch_map | length > 0)
 
     - name: Build dry-run plan
       ansible.builtin.command:
@@ -272,41 +372,42 @@
         REMOTE_NAME: "{{ remote_name }}"
         PULL_FF_ONLY: "{{ pull_ff_only | bool | ternary('1', '0') }}"
         DRY_RUN: "1"
-      loop: "{{ repo_dirs_for_actions }}"
+        DIRTY_REPO: "{{ (item in dirty_repos) | ternary('1', '0') }}"
+      loop: "{{ repo_dirs_for_actions_remote }}"
       register: dry_run_plan
       failed_when: false
-      when: dry_run | bool
+      when: dry_run | bool and (repo_dirs_for_actions_remote | length > 0)
 
     - name: Show dry-run plan
       ansible.builtin.debug:
         msg: "DRY_RUN: {{ item.item }} -> {{ item.stdout }}"
       loop: "{{ dry_run_plan.results | default([]) }}"
-      when: dry_run | bool
+      when: dry_run | bool and (dry_run_plan is defined)
 
     - name: Git pull each repo (ff-only)
       ansible.builtin.command:
         argv: "{{ ['git', 'pull'] + ((pull_ff_only | bool) | ternary(['--ff-only'], [])) }}"
         chdir: "{{ item }}"
-      loop: "{{ repo_dirs_for_actions }}"
+      loop: "{{ repo_dirs_for_pull | default([]) }}"
       register: git_pull_results
       changed_when: >-
         ('Already up to date.' not in (stdout | default(''))) and
         ('Already up-to-date.' not in (stdout | default('')))
       failed_when: false
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (repo_dirs_for_pull | default([]) | length > 0)
 
     - name: Show summary
       ansible.builtin.debug:
         msg: "{{ item.item }} -> branch={{ repo_branch_map[item.item] | default('') }} rc={{ item.rc }} stdout={{ item.stdout | default('') }} stderr={{ item.stderr | default('') }}"
       loop: "{{ git_pull_results.results | default([]) }}"
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (git_pull_results is defined)
 
     - name: Show git pull failures (summary)
       ansible.builtin.debug:
         msg: "{{ git_pull_results.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}"
-      when: not (dry_run | bool) and (git_pull_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
+      when: not (dry_run | bool) and (git_pull_results is defined) and (git_pull_results.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0)
 
     - name: Show repos where git pull ran OK
       ansible.builtin.debug:
         msg: "{{ git_pull_results.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
-      when: not (dry_run | bool)
+      when: not (dry_run | bool) and (git_pull_results is defined)
